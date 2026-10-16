@@ -1,0 +1,15 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+logs/
+
+# Local agent/IDE workspace data — not part of the project
+.workbuddy/
+.claude/
+.agents/
