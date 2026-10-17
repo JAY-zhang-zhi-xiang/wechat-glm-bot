@@ -89,6 +89,20 @@ def test_install_script_is_present_and_valid():
     assert "systemctl restart" in content
 
 
+def test_install_script_is_marked_executable_by_git():
+    import subprocess
+
+    output = subprocess.run(
+        ["git", "ls-files", "-s", "deploy/install.sh"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+    assert output.startswith("100755"), output
+
+
 def test_readme_documents_server_deployment_paths():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
