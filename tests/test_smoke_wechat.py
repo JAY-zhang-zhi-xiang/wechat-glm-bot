@@ -188,7 +188,10 @@ def test_run_smoke_can_require_readiness_without_real_network(monkeypatch):
     assert "http://127.0.0.1:8000/ready" in checked_urls
 
 
-def test_main_requires_token(capsys):
+def test_main_requires_token(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("WECHAT_TOKEN", raising=False)
+
     exit_code = smoke_wechat.main(["--base-url", "http://127.0.0.1:8000"])
 
     assert exit_code == 2

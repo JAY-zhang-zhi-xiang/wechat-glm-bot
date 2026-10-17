@@ -65,3 +65,33 @@ def test_systemd_service_loads_env_and_uses_proxy_headers():
     assert "--proxy-headers" in service
     assert "NoNewPrivileges=true" in service
     assert "PrivateTmp=true" in service
+
+
+def test_deploy_files_use_placeholders_not_real_infrastructure():
+    for name in ("nginx-wechat-glm.conf", "wechat-glm-assistant.service"):
+        content = (ROOT / "deploy" / name).read_text(encoding="utf-8")
+        assert "39.108.227.219" not in content
+        assert "zhangzhixiang" not in content
+
+    nginx = (ROOT / "deploy" / "nginx-wechat-glm.conf").read_text(encoding="utf-8")
+    assert "server_name your-domain-or-server-ip;" in nginx
+
+
+def test_install_script_is_present_and_valid():
+    script = ROOT / "deploy" / "install.sh"
+    assert script.exists()
+
+    content = script.read_text(encoding="utf-8")
+    assert content.startswith("#!/usr/bin/env bash")
+    for flag in ("--server-address", "--install-dir", "--skip-packages"):
+        assert flag in content
+    assert "nginx -t" in content
+    assert "systemctl restart" in content
+
+
+def test_readme_documents_server_deployment_paths():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "deploy/install.sh" in readme
+    assert "--server-address" in readme
+    assert "certbot" in readme

@@ -286,62 +286,42 @@ python scripts/rotate_tokens.py --apply --env-file .env --wechat-token
 
 ## 服务器部署
 
-安装基础环境：
+项目自带一键部署脚本 `deploy/install.sh`，适合在一台全新的 Linux 服务器上（CentOS / AlmaLinux / Rocky 用 `dnf`，Debian / Ubuntu 用 `apt`）从零装好 systemd 服务、Nginx 反向代理和虚拟环境。
+
+准备一台有公网 IP 的服务器，把项目传到服务器后执行：
 
 ```bash
-sudo dnf install -y git curl nginx python3.11 python3.11-pip
+cd wechat-glm-bot
+sudo bash deploy/install.sh --server-address 你的公网IP或域名
 ```
 
-上传项目后，在服务器中执行：
+`--server-address` 是微信要回调的地址，脚本会把它写进 Nginx 的 `server_name`。
+
+脚本会自动完成：
+
+- 安装 `python3`、`nginx`、`curl`、`rsync`（可用 `--skip-packages` 跳过）
+- 创建系统用户 `wechat-glm` 和安装目录 `/opt/wechat-glm-assistant`
+- 同步项目文件（自动排除 `.git`、`.venv`、`.env`、缓存目录）
+- 建虚拟环境并安装 `requirements.txt`
+- 首次运行从 `.env.example` 生成 `.env`，权限设为 `600`
+- 写入 Nginx 配置并 `nginx -t` 校验后重启
+- 写入并启用 systemd 服务，等待 `/health` 通过
+
+首次运行后 `.env` 里还没有真实密钥，脚本会提示你补齐并重启：
 
 ```bash
-cd ~/wechat-glm-assistant
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install -U pip
-pip install -r requirements.txt
-cp .env.example .env
-nano .env
+sudo nano /opt/wechat-glm-assistant/.env
+sudo systemctl restart wechat-glm-assistant
 ```
 
-配置完成后先做离线检查：
+脚本可重复执行（幂等），改完代码重新 `sudo bash deploy/install.sh --server-address ...` 即可完成更新和重启。
 
-```bash
-python scripts/check_config.py
-```
+> 安全组 / 防火墙需要放行入站 TCP 80，否则微信回调会连不上。
 
 公网部署建议设置 `ADMIN_TOKEN`，把 `ENABLE_DOCS=false`，并设置 `ALLOW_ADMIN_TOKEN_QUERY=false`；配置检查脚本会对公开诊断接口、URL 查询参数令牌和自动文档给出 warning。
 上线前可使用 `python scripts/check_config.py --strict-warnings`，或在统一检查中使用 `python scripts/run_checks.py --strict-config`，让 warning 也阻断发布。
 
-手动启动验证：
-
-```bash
-uvicorn main:app --host 127.0.0.1 --port 8000 --proxy-headers
-curl http://127.0.0.1:8000/
-curl http://127.0.0.1:8000/health
-curl http://127.0.0.1:8000/ready
-curl http://127.0.0.1:8000/metrics
-```
-
-配置 Nginx：
-
-```bash
-sudo cp deploy/nginx-wechat-glm.conf /etc/nginx/conf.d/wechat-glm.conf
-sudo nginx -t
-sudo systemctl enable --now nginx
-sudo systemctl restart nginx
-```
-
 Nginx 会把 `$request_id` 作为 `X-Request-ID` 传给 FastAPI；排查线上问题时，可用响应头里的 `X-Request-ID` 对照 `/var/log/nginx/wechat-glm-access.log` 和 `journalctl -u wechat-glm-assistant -f`。访问日志只记录路径，不记录 query string，避免临时诊断参数落盘。
-
-配置 systemd：
-
-```bash
-sudo cp deploy/wechat-glm-assistant.service /etc/systemd/system/wechat-glm-assistant.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now wechat-glm-assistant
-sudo systemctl status wechat-glm-assistant --no-pager
-```
 
 查看日志：
 
@@ -349,49 +329,105 @@ sudo systemctl status wechat-glm-assistant --no-pager
 journalctl -u wechat-glm-assistant -f
 ```
 
+### 手动部署（不使用脚本）
+
+如果你想自己控制每一步：
+
+```bash
+sudo dnf install -y git curl nginx python3 python3-pip
+cd ~/wechat-glm-bot
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -U pip
+pip install -r requirements.txt
+cp .env.example .env
+nano .env
+python scripts/check_config.py
+```
+
+手动启动验证：
+
+```bash
+uvicorn main:app --host 127.0.0.1 --port 8000 --proxy-headers
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/ready
+```
+
+把 `deploy/nginx-wechat-glm.conf` 里的 `your-domain-or-server-ip` 改成真实地址后安装：
+
+```bash
+sudo cp deploy/nginx-wechat-glm.conf /etc/nginx/conf.d/wechat-glm.conf
+sudo nginx -t && sudo systemctl enable --now nginx && sudo systemctl restart nginx
+```
+
+把 `deploy/wechat-glm-assistant.service` 里的 `User=` 和 `/opt/wechat-glm-assistant` 改成你的真实用户和路径后安装：
+
+```bash
+sudo cp deploy/wechat-glm-assistant.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now wechat-glm-assistant
+```
+
+### 部署后验证
+
 部署完成后，可以在服务器上或本机直接验证外网入口：
 
 ```bash
-python scripts/smoke_wechat.py --base-url http://your-server-ip --token 你的微信Token
+python scripts/smoke_wechat.py --base-url http://你的服务器IP --token 你的微信Token
 ```
 
 如果服务器 `.env` 已经填好 `ZHIPU_API_KEY` 且依赖安装完整，可以加上 `--require-ready`：
 
 ```bash
-python scripts/smoke_wechat.py --base-url http://your-server-ip --token 你的微信Token --require-ready
+python scripts/smoke_wechat.py --base-url http://你的服务器IP --token 你的微信Token --require-ready
 ```
 
 如果服务器配置了 `ADMIN_TOKEN`：
 
 ```bash
-python scripts/smoke_wechat.py --base-url http://your-server-ip --token 你的微信Token --require-ready --admin-token 你的诊断Token
+python scripts/smoke_wechat.py --base-url http://你的服务器IP --token 你的微信Token --require-ready --admin-token 你的诊断Token
 ```
+
+### 升级到 HTTPS
+
+微信正式号要求回调走 HTTPS。拿到域名后，推荐用 Certbot 申请免费证书：
+
+```bash
+sudo dnf install -y certbot python3-certbot-nginx   # Debian/Ubuntu 用 apt
+sudo certbot --nginx -d your.domain.com
+```
+
+Certbot 会自动改写 Nginx 配置并加上自动续期。之后把微信后台的 URL 从 `http://` 换成 `https://` 即可。
 
 ## 微信测试号配置
 
 在微信公众号测试号后台填写：
 
 ```text
-URL: http://your-server-ip/wechat
+URL: http://你的服务器IP/wechat
 Token: 和 .env 里的 WECHAT_TOKEN 完全一致
 消息加解密方式: 明文模式
 ```
 
-第一版仍然是明文 HTTP 测试部署。正式使用建议尽快配置 HTTPS，并把 Nginx `server_name` 改成域名。
+URL 必须是公网可达的地址。如果服务器还没备案，直接用公网 IP 即可，不需要域名。
+
+第一版是明文 HTTP 测试部署。正式使用建议尽快配置 HTTPS，并把 Nginx `server_name` 改成域名（见上文「升级到 HTTPS」）。
 
 ## 常见问题
 
 微信后台保存 URL 失败：
 
-- 检查阿里云安全组是否放行 80
+- 检查服务器安全组 / 防火墙是否放行 80
 - 检查 `sudo nginx -t` 是否通过
 - 检查 `.env` 里的 `WECHAT_TOKEN` 是否和后台 Token 一致
 - 检查服务是否运行：`curl http://127.0.0.1:8000/health`
-- 如果服务器时间不准，签名时间窗口可能失败；先同步 NTP，或临时把 `WECHAT_SIGNATURE_TOLERANCE_SECONDS=0`
+- 如果服务器时间不准，签名时间窗口可能失败；先同步 NTP：`sudo timedatectl set-ntp true`，或临时把 `WECHAT_SIGNATURE_TOLERANCE_SECONDS=0`
+- 用 `sudo bash deploy/install.sh --server-address ...` 时，确认传入的地址和微信后台填写的一致
 
 微信收到“处理慢了或出错了”：
 
-- 检查 `ZHIPU_API_KEY`
+- 检查 `ZHIPU_API_KEY` 是否填对
 - 检查模型名是否可用
 - 查看日志：`journalctl -u wechat-glm-assistant -f`
 - 被动回复需要尽快返回；如果模型经常超时，先降低 `GLM_TIMEOUT_SECONDS` 或 `MODEL_MAX_TOKENS`，后续再升级为异步客服消息方案
+- 确认 `/ready` 返回 200：`curl http://127.0.0.1:8000/ready`
