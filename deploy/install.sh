@@ -159,16 +159,28 @@ prepare_env() {
   chmod 600 "$INSTALL_DIR/.env"
 
   local missing=()
-  grep -qE '^ZHIPU_API_KEY=(replace-with-|$)' "$INSTALL_DIR/.env" &&
-    missing+=("ZHIPU_API_KEY")
   grep -qE '^WECHAT_TOKEN=(replace-with-|$)' "$INSTALL_DIR/.env" &&
     missing+=("WECHAT_TOKEN")
+
+  # The model key may sit in LLM_API_KEY or in a provider-specific alias.
+  local provider key_found=0
+  provider=$(grep -E '^LLM_PROVIDER=' "$INSTALL_DIR/.env" | head -1 | cut -d= -f2- | tr -d '[:space:]')
+  provider=${provider:-zhipu}
+  for name in LLM_API_KEY "$(echo "$provider" | tr '[:lower:]' '[:upper:]')_API_KEY"; do
+    local value
+    value=$(grep -E "^${name}=" "$INSTALL_DIR/.env" | head -1 | cut -d= -f2- | tr -d '[:space:]')
+    if [[ -n "$value" && "$value" != replace-with-* ]]; then
+      key_found=1
+      break
+    fi
+  done
+  [[ $key_found -eq 1 ]] || missing+=("LLM_API_KEY (provider=${provider})")
 
   if [[ ${#missing[@]} -gt 0 ]]; then
     ENV_READY=0
     warn "These values are still unset in $INSTALL_DIR/.env: ${missing[*]}"
   else
-    log ".env looks configured."
+    log ".env looks configured (LLM_PROVIDER=${provider})."
   fi
 }
 
@@ -208,7 +220,7 @@ verify() {
 
   log "Health check passed."
   if ! curl -fsS --max-time 3 http://127.0.0.1:8000/ready >/dev/null 2>&1; then
-    warn "/ready is not 200 yet (check ZHIPU_API_KEY and the other .env values)."
+    warn "/ready is not 200 yet (check LLM_API_KEY / WECHAT_TOKEN and the other .env values)."
   fi
 
   echo

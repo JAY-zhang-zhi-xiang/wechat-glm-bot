@@ -1,6 +1,7 @@
 fastapi>=0.115,<1
 uvicorn[standard]>=0.34,<1
 python-dotenv>=1,<2
-zhipuai>=2.1.5
 httpx>=0.27,<1
 defusedxml>=0.7,<1
+# Only needed when LLM_PROVIDER=zhipu. DeepSeek/OpenAI go through httpx.
+zhipuai>=2.1.5

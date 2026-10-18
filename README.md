@@ -1,6 +1,6 @@
 # 微信贾维斯
 
-一个基于 FastAPI 的微信公众号测试号回调服务。微信把消息回调到服务器，服务调用智谱 GLM 文本/视觉模型，再用微信被动回复返回到聊天窗口。
+一个基于 FastAPI 的微信公众号测试号回调服务。微信把消息回调到服务器，服务调用大模型（默认 DeepSeek，也支持智谱 GLM / OpenAI），再用微信被动回复返回到聊天窗口。
 
 ## 功能
 
@@ -51,7 +51,7 @@
  -> http://your-server-ip/wechat
  -> Nginx 80
  -> FastAPI 127.0.0.1:8000
- -> 智谱 GLM 文本/视觉模型
+ -> DeepSeek / 智谱 GLM / 任意 OpenAI 兼容模型
  -> 微信聊天窗口
 ```
 
@@ -68,9 +68,21 @@ cp .env.example .env
 编辑 `.env`，至少填写：
 
 ```env
-ZHIPU_API_KEY=你的智谱 API Key
+LLM_PROVIDER=deepseek
+LLM_API_KEY=你的 DeepSeek API Key
+TEXT_MODEL=deepseek-chat
 WECHAT_TOKEN=你在微信测试号后台填写的 Token
 ```
+
+切换模型供应商只需改两行：
+
+| 供应商 | `LLM_PROVIDER` | `LLM_API_KEY` | `TEXT_MODEL` | `VISION_MODEL` |
+| --- | --- | --- | --- | --- |
+| DeepSeek（默认） | `deepseek` | DeepSeek Key | `deepseek-chat` | 留空（不支持视觉） |
+| 智谱 GLM | `zhipu` | 智谱 Key | `glm-4-flash` | `glm-4v-flash` |
+| OpenAI | `openai` | OpenAI Key | `gpt-4o-mini` | `gpt-4o-mini` |
+
+`LLM_API_KEY` 为空时会自动回退到 `DEEPSEEK_API_KEY` / `ZHIPU_API_KEY` / `OPENAI_API_KEY`，老的 GLM 部署不用改 `.env` 也能继续跑。
 
 `WECHAT_TOKEN` 和 `ADMIN_TOKEN` 建议使用随机长字符串；公网部署时，`WECHAT_TOKEN` 建议至少 16 位，`ADMIN_TOKEN` 建议至少 24 位。自动文档和 URL 管理令牌默认关闭；本地需要接口文档时可在自己的 `.env` 中设置 `ENABLE_DOCS=true`。
 
@@ -93,7 +105,7 @@ curl http://127.0.0.1:8000/health
 curl http://127.0.0.1:8000/ready
 ```
 
-`/health` 只表示服务进程活着；`/ready` 会在 `WECHAT_TOKEN`、`ZHIPU_API_KEY` 或 `zhipuai` SDK 缺失时返回 `503`。
+`/health` 只表示服务进程活着；`/ready` 会在 `WECHAT_TOKEN`、模型 API Key 或对应 SDK 缺失时返回 `503`，并给出当前 `llm_provider`、`vision_supported`。
 如果设置了 `ADMIN_TOKEN`，访问 `/ready` 需要带 `X-Admin-Token` 请求头。只有显式设置 `ALLOW_ADMIN_TOKEN_QUERY=true` 时才允许使用 `?admin_token=...` 查询参数，正式环境应使用请求头传递。
 
 查看运行指标：
@@ -181,18 +193,21 @@ python scripts/smoke_wechat.py --base-url http://127.0.0.1:8000 --token 你的�
 
 | 变量 | 说明 | 默认值 |
 | --- | --- | --- |
-| `ZHIPU_API_KEY` | 智谱 API Key | 空 |
+| `LLM_PROVIDER` | 模型供应商：`deepseek` / `zhipu` / `openai` | `zhipu`（`.env.example` 里是 `deepseek`） |
+| `LLM_API_KEY` | 模型 API Key，优先于下面几个别名 | 空 |
+| `LLM_BASE_URL` | 自定义 API 地址，留空则用供应商默认值 | 空 |
+| `ZHIPU_API_KEY` / `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` | 供应商专用别名，`LLM_API_KEY` 为空时生效 | 空 |
 | `WECHAT_TOKEN` | 微信公众号后台配置的 Token，公网建议至少 16 位随机字符串 | 空 |
 | `ADMIN_TOKEN` | `/ready` 和 `/metrics` 的可选访问令牌，公网建议至少 24 位随机字符串，留空则不启用 | 空 |
 | `ENABLE_DOCS` | 是否启用 `/docs`、`/redoc`、`/openapi.json` | `false` |
 | `ALLOW_ADMIN_TOKEN_QUERY` | 是否允许用 `?admin_token=...` 访问诊断接口；建议使用 `X-Admin-Token` 请求头 | `false` |
 | `LOG_LEVEL` | 服务日志级别，可选 `DEBUG`、`INFO`、`WARNING`、`ERROR`、`CRITICAL` | `INFO` |
 | `TEXT_MODEL` | 文本模型 | `glm-4-flash` |
-| `VISION_MODEL` | 视觉模型 | `glm-4v-flash` |
+| `VISION_MODEL` | 视觉模型；DeepSeek 无视觉接口，图片消息会返回文字提示 | `glm-4v-flash` |
 | `BOT_NAME` | 关注欢迎语中的助手名 | `贾维斯` |
-| `GLM_TIMEOUT_SECONDS` | GLM 调用超时 | `4` |
+| `GLM_TIMEOUT_SECONDS` | 模型调用超时（变量名为兼容保留） | `4` |
 | `MODEL_MAX_TOKENS` | 单次模型回复的最大 token 数，调小可降低延迟和成本 | `800` |
-| `MODEL_MAX_CONCURRENT_CALLS` | 单进程同时执行的 GLM 调用上限，超过时快速返回忙碌提示 | `4` |
+| `MODEL_MAX_CONCURRENT_CALLS` | 单进程同时执行的模型调用上限，超过时快速返回忙碌提示 | `4` |
 | `MAX_REPLY_CHARS` | 微信文本回复最大字符数 | `650` |
 | `MAX_MODEL_INPUT_CHARS` | 单次发给模型的用户文本最大字符数，设为 `0` 可关闭裁剪 | `4000` |
 | `MAX_REQUEST_BYTES` | 微信回调请求体最大字节数 | `65536` |
@@ -376,7 +391,7 @@ sudo systemctl enable --now wechat-glm-assistant
 python scripts/smoke_wechat.py --base-url http://你的服务器IP --token 你的微信Token
 ```
 
-如果服务器 `.env` 已经填好 `ZHIPU_API_KEY` 且依赖安装完整，可以加上 `--require-ready`：
+如果服务器 `.env` 已经填好 `LLM_API_KEY` 且依赖安装完整，可以加上 `--require-ready`：
 
 ```bash
 python scripts/smoke_wechat.py --base-url http://你的服务器IP --token 你的微信Token --require-ready
@@ -426,7 +441,7 @@ URL 必须是公网可达的地址。如果服务器还没备案，直接用公�
 
 微信收到“处理慢了或出错了”：
 
-- 检查 `ZHIPU_API_KEY` 是否填对
+- 检查 `LLM_API_KEY`（或 `DEEPSEEK_API_KEY` / `ZHIPU_API_KEY`）是否填对，`LLM_PROVIDER` 是否和 Key 匹配
 - 检查模型名是否可用
 - 查看日志：`journalctl -u wechat-glm-assistant -f`
 - 被动回复需要尽快返回；如果模型经常超时，先降低 `GLM_TIMEOUT_SECONDS` 或 `MODEL_MAX_TOKENS`，后续再升级为异步客服消息方案

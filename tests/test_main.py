@@ -44,7 +44,7 @@ def reset_settings(monkeypatch):
     monkeypatch.delenv("WECHAT_APP_SECRET", raising=False)
     monkeypatch.delenv("ENABLE_CUSTOMER_SERVICE_FALLBACK", raising=False)
     main.get_settings.cache_clear()
-    main.get_zhipu_client.cache_clear()
+    main.get_llm_client.cache_clear()
     main.get_moderation_blocklist.cache_clear()
     with main._reply_cache_lock:
         main._reply_cache.clear()
@@ -73,8 +73,8 @@ def reset_settings(monkeypatch):
         main._last_alert_at = 0.0
     yield
     main.get_settings.cache_clear()
-    if hasattr(main.get_zhipu_client, "cache_clear"):
-        main.get_zhipu_client.cache_clear()
+    if hasattr(main.get_llm_client, "cache_clear"):
+        main.get_llm_client.cache_clear()
     main.get_moderation_blocklist.cache_clear()
 
 
@@ -157,7 +157,7 @@ def test_health_does_not_require_zhipuai_package():
 
     assert response.status_code == 200
     assert response.json()["ok"] is True
-    assert response.json()["zhipu_key_configured"] is False
+    assert response.json()["llm_key_configured"] is False
     assert response.json()["conversation_memory_enabled"] is True
     assert response.json()["rate_limit_enabled"] is True
     assert response.json()["max_model_input_chars"] == 4000
@@ -312,13 +312,13 @@ def test_ready_reports_missing_required_configuration():
     assert response.status_code == 503
     assert response.json()["ok"] is False
     assert response.json()["checks"]["wechat_token_configured"] is True
-    assert response.json()["checks"]["zhipu_key_configured"] is False
+    assert response.json()["checks"]["llm_key_configured"] is False
 
 
 def test_ready_succeeds_when_required_configuration_is_available(monkeypatch):
     monkeypatch.setenv("ZHIPU_API_KEY", "key")
     main.get_settings.cache_clear()
-    monkeypatch.setattr(main, "zhipuai_package_available", lambda: True)
+    monkeypatch.setattr(main, "llm_sdk_available", lambda provider: True)
     client = TestClient(main.app)
 
     response = client.get("/ready")
@@ -328,22 +328,24 @@ def test_ready_succeeds_when_required_configuration_is_available(monkeypatch):
         "ok": True,
         "checks": {
             "wechat_token_configured": True,
-            "zhipu_key_configured": True,
-            "zhipuai_package_available": True,
+            "llm_provider": "zhipu",
+            "llm_key_configured": True,
+            "llm_sdk_available": True,
+            "vision_supported": True,
         },
     }
 
 
-def test_ready_reports_missing_zhipuai_package(monkeypatch):
+def test_ready_reports_missing_model_sdk(monkeypatch):
     monkeypatch.setenv("ZHIPU_API_KEY", "key")
     main.get_settings.cache_clear()
-    monkeypatch.setattr(main, "zhipuai_package_available", lambda: False)
+    monkeypatch.setattr(main, "llm_sdk_available", lambda provider: False)
     client = TestClient(main.app)
 
     response = client.get("/ready")
 
     assert response.status_code == 503
-    assert response.json()["checks"]["zhipuai_package_available"] is False
+    assert response.json()["checks"]["llm_sdk_available"] is False
 
 
 def test_ready_requires_admin_token_when_configured(monkeypatch):
@@ -669,7 +671,7 @@ def test_reply_to_text_trims_long_model_input(monkeypatch):
     main.get_settings.cache_clear()
     monkeypatch.setattr(
         main,
-        "get_zhipu_client",
+        "get_llm_client",
         lambda: SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions())),
     )
 
@@ -710,7 +712,7 @@ def test_model_input_trimming_can_be_disabled(monkeypatch):
     main.get_settings.cache_clear()
     monkeypatch.setattr(
         main,
-        "get_zhipu_client",
+        "get_llm_client",
         lambda: SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions())),
     )
 
@@ -724,7 +726,7 @@ def test_help_command_does_not_call_model(monkeypatch):
     def fail_if_called():
         raise AssertionError("model should not be called for help")
 
-    monkeypatch.setattr(main, "get_zhipu_client", fail_if_called)
+    monkeypatch.setattr(main, "get_llm_client", fail_if_called)
 
     reply = main.reply_to_user_text("help", "user")
 
@@ -850,7 +852,7 @@ def test_reply_to_text_calls_configured_text_model(monkeypatch):
     monkeypatch.setenv("ZHIPU_API_KEY", "key")
     monkeypatch.setenv("TEXT_MODEL", "text-model")
     main.get_settings.cache_clear()
-    monkeypatch.setattr(main, "get_zhipu_client", lambda: fake_client)
+    monkeypatch.setattr(main, "get_llm_client", lambda: fake_client)
 
     reply = main.reply_to_text("hello")
 
@@ -882,7 +884,7 @@ def test_model_concurrency_limit_rejects_excess_call(monkeypatch):
     monkeypatch.setenv("ZHIPU_API_KEY", "key")
     monkeypatch.setenv("MODEL_MAX_CONCURRENT_CALLS", "1")
     main.get_settings.cache_clear()
-    monkeypatch.setattr(main, "get_zhipu_client", lambda: fake_client)
+    monkeypatch.setattr(main, "get_llm_client", lambda: fake_client)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         first_future = executor.submit(main.reply_to_text, "first")
@@ -915,7 +917,7 @@ def test_reply_to_text_uses_configured_model_max_tokens(monkeypatch):
     monkeypatch.setenv("ZHIPU_API_KEY", "key")
     monkeypatch.setenv("MODEL_MAX_TOKENS", "120")
     main.get_settings.cache_clear()
-    monkeypatch.setattr(main, "get_zhipu_client", lambda: fake_client)
+    monkeypatch.setattr(main, "get_llm_client", lambda: fake_client)
 
     reply = main.reply_to_text("hello")
 
@@ -939,7 +941,7 @@ def test_reply_to_text_records_model_duration(monkeypatch):
     times = iter([100.0, 100.2])
     monkeypatch.setenv("ZHIPU_API_KEY", "key")
     main.get_settings.cache_clear()
-    monkeypatch.setattr(main, "get_zhipu_client", lambda: fake_client)
+    monkeypatch.setattr(main, "get_llm_client", lambda: fake_client)
     monkeypatch.setattr(main.time, "perf_counter", lambda: next(times))
 
     reply = main.reply_to_text("hello")
@@ -963,7 +965,7 @@ def test_reply_to_text_tracks_model_call_errors(monkeypatch):
     )
     monkeypatch.setenv("ZHIPU_API_KEY", "key")
     main.get_settings.cache_clear()
-    monkeypatch.setattr(main, "get_zhipu_client", lambda: fake_client)
+    monkeypatch.setattr(main, "get_llm_client", lambda: fake_client)
 
     with pytest.raises(RuntimeError, match="model failed"):
         main.reply_to_text("hello")
@@ -989,7 +991,7 @@ def test_reply_to_image_calls_configured_vision_model(monkeypatch):
     monkeypatch.setenv("ZHIPU_API_KEY", "key")
     monkeypatch.setenv("VISION_MODEL", "vision-model")
     main.get_settings.cache_clear()
-    monkeypatch.setattr(main, "get_zhipu_client", lambda: fake_client)
+    monkeypatch.setattr(main, "get_llm_client", lambda: fake_client)
 
     reply = main.reply_to_image("https://example.com/image.jpg")
 
@@ -1020,7 +1022,7 @@ def test_reply_to_image_uses_configured_model_max_tokens(monkeypatch):
     monkeypatch.setenv("ZHIPU_API_KEY", "key")
     monkeypatch.setenv("MODEL_MAX_TOKENS", "120")
     main.get_settings.cache_clear()
-    monkeypatch.setattr(main, "get_zhipu_client", lambda: fake_client)
+    monkeypatch.setattr(main, "get_llm_client", lambda: fake_client)
 
     reply = main.reply_to_image("https://example.com/image.jpg")
 
@@ -1044,7 +1046,7 @@ def test_reply_to_image_records_model_duration(monkeypatch):
     times = iter([50.0, 50.075])
     monkeypatch.setenv("ZHIPU_API_KEY", "key")
     main.get_settings.cache_clear()
-    monkeypatch.setattr(main, "get_zhipu_client", lambda: fake_client)
+    monkeypatch.setattr(main, "get_llm_client", lambda: fake_client)
     monkeypatch.setattr(main.time, "perf_counter", lambda: next(times))
 
     reply = main.reply_to_image("https://example.com/image.jpg")
@@ -1099,7 +1101,7 @@ def test_reply_to_text_applies_moderation_blocklist(monkeypatch, tmp_path):
 
     monkeypatch.setattr(
         main,
-        "get_zhipu_client",
+        "get_llm_client",
         lambda: SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions())),
     )
 
@@ -1124,7 +1126,7 @@ def test_reply_to_text_ignores_non_matching_blocklist(monkeypatch, tmp_path):
 
     monkeypatch.setattr(
         main,
-        "get_zhipu_client",
+        "get_llm_client",
         lambda: SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions())),
     )
 
@@ -1149,7 +1151,7 @@ def test_call_glm_retries_once_on_connect_error(monkeypatch):
     fake_client = SimpleNamespace(chat=SimpleNamespace(completions=FlakyCompletions()))
     monkeypatch.setenv("ZHIPU_API_KEY", "key")
     main.get_settings.cache_clear()
-    monkeypatch.setattr(main, "get_zhipu_client", lambda: fake_client)
+    monkeypatch.setattr(main, "get_llm_client", lambda: fake_client)
 
     response = main.call_glm(
         "text", "model", [{"role": "user", "content": "hi"}], temperature=0.5, max_tokens=100
@@ -1171,7 +1173,7 @@ def test_call_glm_does_not_retry_on_read_timeout(monkeypatch):
     fake_client = SimpleNamespace(chat=SimpleNamespace(completions=TimeoutCompletions()))
     monkeypatch.setenv("ZHIPU_API_KEY", "key")
     main.get_settings.cache_clear()
-    monkeypatch.setattr(main, "get_zhipu_client", lambda: fake_client)
+    monkeypatch.setattr(main, "get_llm_client", lambda: fake_client)
 
     with pytest.raises(httpx.ReadTimeout):
         main.call_glm(
@@ -1195,7 +1197,7 @@ def test_call_glm_retry_failure_is_not_retried_again(monkeypatch):
     )
     monkeypatch.setenv("ZHIPU_API_KEY", "key")
     main.get_settings.cache_clear()
-    monkeypatch.setattr(main, "get_zhipu_client", lambda: fake_client)
+    monkeypatch.setattr(main, "get_llm_client", lambda: fake_client)
 
     with pytest.raises(httpx.ConnectError):
         main.call_glm("text", "model", [], temperature=0.5, max_tokens=100)
@@ -1446,3 +1448,111 @@ def test_metrics_prometheus_includes_message_type_and_model_duration_lines():
 
     assert 'wechat_glm_message_type_total{type="text"}' in response.text
     assert 'wechat_glm_model_duration_ms_total{kind="text"}' in response.text
+
+
+def test_deepseek_provider_resolves_key_and_default_base_url(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "deepseek")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-key")
+    main.get_settings.cache_clear()
+    main.get_llm_client.cache_clear()
+
+    settings = main.get_settings()
+    client = main.get_llm_client()
+
+    assert settings.llm_provider == "deepseek"
+    assert settings.llm_api_key == "ds-key"
+    assert isinstance(client, main.OpenAICompatibleClient)
+    assert client._base_url == "https://api.deepseek.com/v1"
+
+
+def test_llm_api_key_wins_over_provider_alias(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "deepseek")
+    monkeypatch.setenv("LLM_API_KEY", "generic-key")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-key")
+    main.get_settings.cache_clear()
+
+    assert main.get_settings().llm_api_key == "generic-key"
+
+
+def test_unknown_provider_falls_back_to_zhipu(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    main.get_settings.cache_clear()
+
+    assert main.get_settings().llm_provider == "zhipu"
+
+
+def test_openai_compatible_client_posts_chat_completions_payload():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["auth"] = request.headers["Authorization"]
+        captured["body"] = request.read().decode()
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "你好，我是 DeepSeek"}}]},
+        )
+
+    client = main.OpenAICompatibleClient(
+        "ds-key",
+        "https://api.deepseek.com/v1",
+        httpx.Timeout(4.0, connect=3.0),
+        transport=httpx.MockTransport(handler),
+    )
+
+    reply = main.completion_content(
+        client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[{"role": "user", "content": "你好"}],
+            temperature=0.6,
+            max_tokens=100,
+        ),
+        "fallback",
+    )
+
+    assert reply == "你好，我是 DeepSeek"
+    assert captured["url"] == "https://api.deepseek.com/v1/chat/completions"
+    assert captured["auth"] == "Bearer ds-key"
+    assert '"model":"deepseek-chat"' in captured["body"].replace(" ", "")
+
+
+def test_openai_compatible_client_raises_on_error_status():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": {"message": "invalid key"}})
+
+    client = main.OpenAICompatibleClient(
+        "bad-key",
+        "https://api.deepseek.com/v1",
+        httpx.Timeout(4.0, connect=3.0),
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(main.ModelCallError):
+        client.create_completion("deepseek-chat", [], 0.5, 10)
+
+
+def test_deepseek_image_message_returns_friendly_reply_without_model_call(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "deepseek")
+    main.get_settings.cache_clear()
+
+    def fail_if_called():
+        raise AssertionError("the model must not be called for images on deepseek")
+
+    monkeypatch.setattr(main, "get_llm_client", fail_if_called)
+
+    assert main.reply_to_image("https://example.com/a.jpg") == main.IMAGE_UNSUPPORTED_REPLY
+
+
+def test_ready_passes_for_text_only_provider(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "deepseek")
+    monkeypatch.setenv("LLM_API_KEY", "ds-key")
+    main.get_settings.cache_clear()
+    monkeypatch.setattr(main, "llm_sdk_available", lambda provider: True)
+    client = TestClient(main.app)
+
+    response = client.get("/ready")
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert response.json()["checks"]["vision_supported"] is False
+

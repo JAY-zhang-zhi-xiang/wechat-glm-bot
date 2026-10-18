@@ -20,7 +20,7 @@ def reset_settings(monkeypatch):
     monkeypatch.delenv("ENABLE_CUSTOMER_SERVICE_FALLBACK", raising=False)
     monkeypatch.delenv("MAX_REPLY_CHARS", raising=False)
     main.get_settings.cache_clear()
-    main.get_zhipu_client.cache_clear()
+    main.get_llm_client.cache_clear()
     main.get_moderation_blocklist.cache_clear()
     with main._reply_cache_lock:
         main._reply_cache.clear()
@@ -50,7 +50,7 @@ def reset_settings(monkeypatch):
         main._last_alert_at = 0.0
     yield
     main.get_settings.cache_clear()
-    main.get_zhipu_client.cache_clear()
+    main.get_llm_client.cache_clear()
     main.get_moderation_blocklist.cache_clear()
     with main._access_token_lock:
         main._access_token_cache["token"] = ""

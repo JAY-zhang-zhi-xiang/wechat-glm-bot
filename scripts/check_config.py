@@ -11,10 +11,23 @@ except ModuleNotFoundError:
     from smoke_wechat import load_env_file
 
 
-REQUIRED_SETTINGS = ("ZHIPU_API_KEY", "WECHAT_TOKEN")
-REQUIRED_PACKAGES = ("fastapi", "uvicorn", "dotenv", "defusedxml", "httpx", "zhipuai")
+SUPPORTED_PROVIDERS = {"zhipu", "deepseek", "openai"}
+DEFAULT_PROVIDER = "zhipu"
+PROVIDER_KEY_ENV_NAMES = {
+    "zhipu": ("ZHIPU_API_KEY",),
+    "deepseek": ("DEEPSEEK_API_KEY",),
+    "openai": ("OPENAI_API_KEY",),
+}
+REQUIRED_PACKAGES = ("fastapi", "uvicorn", "dotenv", "defusedxml", "httpx")
+PROVIDER_PACKAGES = {"zhipu": ("zhipuai",)}
 OPTIONAL_SETTINGS = (
     "ADMIN_TOKEN",
+    "LLM_PROVIDER",
+    "LLM_API_KEY",
+    "LLM_BASE_URL",
+    "ZHIPU_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "OPENAI_API_KEY",
     "TEXT_MODEL",
     "VISION_MODEL",
     "SYSTEM_PROMPT",
@@ -32,6 +45,7 @@ BOOL_FALSE_VALUES = {"0", "false", "no", "off"}
 BOOL_VALUES = BOOL_TRUE_VALUES | BOOL_FALSE_VALUES
 ENUM_RULES = {
     "LOG_LEVEL": {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"},
+    "LLM_PROVIDER": {"ZHIPU", "DEEPSEEK", "OPENAI"},
 }
 INT_RULES = {
     "MODEL_MAX_TOKENS": 1,
@@ -54,6 +68,7 @@ INT_RULES = {
     "ALERT_MIN_INTERVAL_SECONDS": 0,
 }
 FLOAT_RULES = {"GLM_TIMEOUT_SECONDS": 0.5}
+MODEL_API_KEY_NAMES = ("LLM_API_KEY", "ZHIPU_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY")
 
 
 @dataclass(frozen=True)
@@ -67,7 +82,8 @@ def merged_config(env_file: str) -> Dict[str, str]:
     for key, value in os.environ.items():
         if (
             key in values
-            or key in REQUIRED_SETTINGS
+            or key == "WECHAT_TOKEN"
+            or key in MODEL_API_KEY_NAMES
             or key in OPTIONAL_SETTINGS
             or key in BOOL_RULES
             or key in ENUM_RULES
@@ -78,31 +94,63 @@ def merged_config(env_file: str) -> Dict[str, str]:
     return values
 
 
+def provider_from_values(values: Dict[str, str]) -> str:
+    raw = values.get("LLM_PROVIDER", "").strip().lower()
+    if not raw:
+        return DEFAULT_PROVIDER
+    return raw
+
+
 def is_placeholder(value: str) -> bool:
     return value.startswith("replace-with-") or value in {"your-token", "your-api-key"}
 
 
 def check_required(values: Dict[str, str]) -> List[CheckResult]:
     results: List[CheckResult] = []
-    for key in REQUIRED_SETTINGS:
-        value = values.get(key, "").strip()
+
+    wechat_token = values.get("WECHAT_TOKEN", "").strip()
+    if not wechat_token:
+        results.append(CheckResult("error", "WECHAT_TOKEN is required"))
+    elif is_placeholder(wechat_token):
+        results.append(CheckResult("error", "WECHAT_TOKEN still uses a placeholder value"))
+    else:
+        results.append(CheckResult("ok", "WECHAT_TOKEN is configured"))
+
+    provider = provider_from_values(values)
+    names = ("LLM_API_KEY",) + PROVIDER_KEY_ENV_NAMES.get(provider, ())
+    for name in names:
+        value = values.get(name, "").strip()
         if not value:
-            results.append(CheckResult("error", f"{key} is required"))
-        elif is_placeholder(value):
-            results.append(CheckResult("error", f"{key} still uses a placeholder value"))
+            continue
+        if is_placeholder(value):
+            results.append(CheckResult("error", f"{name} still uses a placeholder value"))
         else:
-            results.append(CheckResult("ok", f"{key} is configured"))
+            results.append(CheckResult("ok", f"{name} is configured"))
+            results.append(CheckResult("ok", f"LLM_PROVIDER={provider}"))
+        break
+    else:
+        expected = " or ".join(names)
+        results.append(CheckResult("error", f"model API key is required: {expected}"))
     return results
 
 
 def check_models(values: Dict[str, str]) -> List[CheckResult]:
     results: List[CheckResult] = []
+    provider = provider_from_values(values)
     for key in ("TEXT_MODEL", "VISION_MODEL"):
         value = values.get(key, "").strip()
         if value:
             results.append(CheckResult("ok", f"{key}={value}"))
         else:
             results.append(CheckResult("warn", f"{key} is empty; the app will use its default"))
+    if provider == "deepseek":
+        results.append(
+            CheckResult(
+                "warn",
+                "DeepSeek's API is text-only; image messages will get a friendly "
+                "text reply instead of a vision answer",
+            )
+        )
     return results
 
 
@@ -272,9 +320,10 @@ def check_customer_service_fallback(values: Dict[str, str]) -> List[CheckResult]
     return [CheckResult("ok", "ENABLE_CUSTOMER_SERVICE_FALLBACK has required app credentials")]
 
 
-def check_dependencies() -> List[CheckResult]:
+def check_dependencies(provider: str = DEFAULT_PROVIDER) -> List[CheckResult]:
     results: List[CheckResult] = []
-    for package in REQUIRED_PACKAGES:
+    packages = REQUIRED_PACKAGES + PROVIDER_PACKAGES.get(provider, ())
+    for package in packages:
         if importlib.util.find_spec(package) is None:
             results.append(CheckResult("error", f"Python package missing: {package}"))
         else:
@@ -296,7 +345,7 @@ def run_checks(env_file: str, skip_dependencies: bool) -> List[CheckResult]:
     results.extend(check_admin_token(values))
     results.extend(check_customer_service_fallback(values))
     if not skip_dependencies:
-        results.extend(check_dependencies())
+        results.extend(check_dependencies(provider_from_values(values)))
     return results
 
 

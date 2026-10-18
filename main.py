@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import lru_cache
 from threading import BoundedSemaphore, Event, Lock, Thread
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -59,6 +60,37 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 DEFAULT_IMAGE_PROMPT = (
     "请用中文简洁分析这张微信图片。如果图片里有文字，也请尽量识别出来。"
+)
+# Model backends. "zhipu" talks to the Zhipu SDK; every other value goes
+# through the OpenAI-compatible /chat/completions HTTP API, which DeepSeek,
+# OpenAI, Moonshot and local servers such as vLLM/Ollama all speak.
+PROVIDER_ZHIPU = "zhipu"
+PROVIDER_DEEPSEEK = "deepseek"
+PROVIDER_OPENAI = "openai"
+SUPPORTED_PROVIDERS = (PROVIDER_ZHIPU, PROVIDER_DEEPSEEK, PROVIDER_OPENAI)
+DEFAULT_BASE_URLS = {
+    PROVIDER_ZHIPU: "https://open.bigmodel.cn/api/paas/v4",
+    PROVIDER_DEEPSEEK: "https://api.deepseek.com/v1",
+    PROVIDER_OPENAI: "https://api.openai.com/v1",
+}
+# LLM_API_KEY always wins; the provider-specific name is a convenience alias so
+# an existing GLM deployment keeps working without touching its .env.
+PROVIDER_KEY_ENV_NAMES = {
+    PROVIDER_ZHIPU: ("ZHIPU_API_KEY",),
+    PROVIDER_DEEPSEEK: ("DEEPSEEK_API_KEY",),
+    PROVIDER_OPENAI: ("OPENAI_API_KEY",),
+}
+# DeepSeek's public API is text-only, so image messages get a friendly answer
+# instead of a failed model call.
+PROVIDERS_WITHOUT_VISION = (PROVIDER_DEEPSEEK,)
+# /ready fails only when one of these is false; the rest is informational.
+READINESS_BLOCKING_CHECKS = (
+    "wechat_token_configured",
+    "llm_key_configured",
+    "llm_sdk_available",
+)
+IMAGE_UNSUPPORTED_REPLY = (
+    "我目前只能处理文字，还看不了图片。你可以用文字描述一下图里的内容，我照样能帮你。"
 )
 FALLBACK_REPLY = "这条消息我刚才处理慢了或出错了，请稍后再试一次。"
 HELP_REPLY = (
@@ -126,8 +158,10 @@ METRIC_NAMES = (
 
 @dataclass(frozen=True)
 class Settings:
-    zhipu_api_key: str
+    llm_api_key: str
     wechat_token: str
+    llm_provider: str = PROVIDER_ZHIPU
+    llm_base_url: str = ""
     admin_token: str = ""
     enable_docs: bool = False
     allow_admin_token_query: bool = False
@@ -197,11 +231,39 @@ def _bool_env(name: str, default: bool) -> bool:
     return default
 
 
+def normalize_provider(value: Optional[str]) -> str:
+    provider = (value or "").strip().lower()
+    if not provider:
+        return PROVIDER_ZHIPU
+    if provider not in SUPPORTED_PROVIDERS:
+        logger.warning(
+            "Unsupported LLM_PROVIDER=%r, falling back to %s", value, PROVIDER_ZHIPU
+        )
+        return PROVIDER_ZHIPU
+    return provider
+
+
+def resolve_llm_api_key(provider: str) -> str:
+    names = ("LLM_API_KEY",) + PROVIDER_KEY_ENV_NAMES.get(provider, ())
+    for name in names:
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def resolve_llm_provider() -> str:
+    return normalize_provider(os.getenv("LLM_PROVIDER"))
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
+    provider = resolve_llm_provider()
     return Settings(
-        zhipu_api_key=os.getenv("ZHIPU_API_KEY", ""),
+        llm_api_key=resolve_llm_api_key(provider),
         wechat_token=os.getenv("WECHAT_TOKEN", ""),
+        llm_provider=provider,
+        llm_base_url=os.getenv("LLM_BASE_URL", "").strip(),
         admin_token=os.getenv("ADMIN_TOKEN", ""),
         enable_docs=_bool_env("ENABLE_DOCS", False),
         allow_admin_token_query=_bool_env("ALLOW_ADMIN_TOKEN_QUERY", False),
@@ -257,24 +319,135 @@ def get_settings() -> Settings:
     )
 
 
-@lru_cache(maxsize=1)
-def get_zhipu_client() -> Any:
-    settings = get_settings()
-    if not settings.zhipu_api_key:
-        raise RuntimeError("ZHIPU_API_KEY is not configured")
+class ModelCallError(RuntimeError):
+    """Raised when the model backend answers with an error."""
 
-    try:
-        from zhipuai import ZhipuAI
-    except ImportError as exc:
-        raise RuntimeError(
-            "zhipuai is not installed; run `pip install -r requirements.txt`"
-        ) from exc
+
+@dataclass
+class _CompletionMessage:
+    content: str
+
+
+@dataclass
+class _CompletionChoice:
+    message: _CompletionMessage
+
+
+@dataclass
+class _Completion:
+    """Just enough of the OpenAI response shape for completion_content()."""
+
+    choices: List[_CompletionChoice]
+
+
+class OpenAICompatibleClient:
+    """Minimal OpenAI-compatible chat client.
+
+    Used for DeepSeek and any other provider that speaks the
+    /chat/completions contract. Implemented on httpx so the project does not
+    need an extra SDK just to switch provider.
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str,
+        timeout: httpx.Timeout,
+        transport: Optional[httpx.BaseTransport] = None,
+    ) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._client = httpx.Client(
+            timeout=timeout,
+            transport=transport,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+        )
+
+    def create_completion(
+        self,
+        model: str,
+        messages: List[Dict[str, Any]],
+        temperature: float,
+        max_tokens: int,
+    ) -> _Completion:
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": False,
+        }
+        try:
+            response = self._client.post(
+                f"{self._base_url}/chat/completions", json=payload
+            )
+        except httpx.HTTPError:
+            raise
+        if response.status_code >= 400:
+            body = response.text[:300]
+            raise ModelCallError(
+                f"model backend returned HTTP {response.status_code}: {body}"
+            )
+        try:
+            data = response.json()
+            content = data["choices"][0]["message"]["content"]
+        except (ValueError, KeyError, IndexError, TypeError) as exc:
+            raise ModelCallError(f"unexpected model response: {exc}") from exc
+        if not isinstance(content, str):
+            raise ModelCallError("model response content was not text")
+        return _Completion(choices=[_CompletionChoice(_CompletionMessage(content))])
+
+    def close(self) -> None:
+        self._client.close()
+
+    def __getattr__(self, name: str) -> Any:
+        # Allow `client.chat.completions.create(...)`, which is the call shape
+        # shared by the zhipuai and openai SDKs.
+        if name == "chat":
+            return SimpleNamespace(
+                completions=SimpleNamespace(create=self.create_completion)
+            )
+        raise AttributeError(name)
+
+
+@lru_cache(maxsize=1)
+def get_llm_client() -> Any:
+    settings = get_settings()
+    if not settings.llm_api_key:
+        provider_key = PROVIDER_KEY_ENV_NAMES.get(settings.llm_provider, ())
+        hint = " or ".join(("LLM_API_KEY",) + provider_key)
+        raise RuntimeError(f"{hint} is not configured")
 
     timeout = httpx.Timeout(
         timeout=settings.glm_timeout_seconds,
         connect=min(3.0, settings.glm_timeout_seconds),
     )
-    return ZhipuAI(api_key=settings.zhipu_api_key, timeout=timeout, max_retries=0)
+
+    if settings.llm_provider == PROVIDER_ZHIPU:
+        try:
+            from zhipuai import ZhipuAI
+        except ImportError as exc:
+            raise RuntimeError(
+                "zhipuai is not installed; run `pip install -r requirements.txt`"
+            ) from exc
+        return ZhipuAI(api_key=settings.llm_api_key, timeout=timeout, max_retries=0)
+
+    base_url = settings.llm_base_url or DEFAULT_BASE_URLS[settings.llm_provider]
+    return OpenAICompatibleClient(settings.llm_api_key, base_url, timeout)
+
+
+def llm_sdk_available(provider: str) -> bool:
+    """Whether the SDK needed for the configured provider can be imported."""
+    if provider == PROVIDER_ZHIPU:
+        return importlib.util.find_spec("zhipuai") is not None
+    return importlib.util.find_spec("httpx") is not None
+
+
+def provider_supports_vision(provider: str) -> bool:
+    return provider not in PROVIDERS_WITHOUT_VISION
 
 
 @asynccontextmanager
@@ -282,13 +455,22 @@ async def _lifespan(app: FastAPI):
     settings = get_settings()
     if not settings.wechat_token:
         logger.error("WECHAT_TOKEN is not configured — WeChat signature verification will always fail")
-    if not settings.zhipu_api_key:
-        logger.error("ZHIPU_API_KEY is not configured — all model calls will fail at runtime")
-    if not zhipuai_package_available():
-        logger.error("zhipuai package is not installed — run: pip install -r requirements.txt")
-    if settings.wechat_token and settings.zhipu_api_key and zhipuai_package_available():
+    if not settings.llm_api_key:
+        logger.error(
+            "No model API key configured (LLM_API_KEY or %s) — all model calls will fail at runtime",
+            " / ".join(PROVIDER_KEY_ENV_NAMES.get(settings.llm_provider, ())),
+        )
+    if not llm_sdk_available(settings.llm_provider):
+        logger.error(
+            "Model SDK for provider %r is not installed — run: pip install -r requirements.txt",
+            settings.llm_provider,
+        )
+    if settings.wechat_token and settings.llm_api_key and llm_sdk_available(
+        settings.llm_provider
+    ):
         logger.info(
-            "service started text_model=%s vision_model=%s bot_name=%s",
+            "service started provider=%s text_model=%s vision_model=%s bot_name=%s",
+            settings.llm_provider,
             settings.text_model,
             settings.vision_model,
             settings.bot_name,
@@ -441,8 +623,10 @@ def health() -> JSONResponse:
             "ok": True,
             "text_model": settings.text_model,
             "vision_model": settings.vision_model,
+            "vision_supported": provider_supports_vision(settings.llm_provider),
+            "llm_provider": settings.llm_provider,
             "wechat_token_configured": bool(settings.wechat_token),
-            "zhipu_key_configured": bool(settings.zhipu_api_key),
+            "llm_key_configured": bool(settings.llm_api_key),
             "docs_enabled": settings.enable_docs,
             "max_request_bytes": settings.max_request_bytes,
             "max_model_input_chars": settings.max_model_input_chars,
@@ -465,7 +649,9 @@ def ready(request: Request) -> JSONResponse:
     require_diagnostic_auth(request)
     settings = get_settings()
     checks = readiness_checks(settings)
-    ok = all(checks.values())
+    # Only the blocking conditions decide readiness; llm_provider and
+    # vision_supported are informational (a text-only provider is fine).
+    ok = all(checks[name] for name in READINESS_BLOCKING_CHECKS)
     return JSONResponse({"ok": ok, "checks": checks}, status_code=200 if ok else 503)
 
 
@@ -579,16 +765,15 @@ def verify_wechat_signature(signature: str, timestamp: str, nonce: str) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
-def readiness_checks(settings: Settings) -> Dict[str, bool]:
+def readiness_checks(settings: Settings) -> Dict[str, Any]:
+    provider = settings.llm_provider
     return {
         "wechat_token_configured": bool(settings.wechat_token),
-        "zhipu_key_configured": bool(settings.zhipu_api_key),
-        "zhipuai_package_available": zhipuai_package_available(),
+        "llm_provider": provider,
+        "llm_key_configured": bool(settings.llm_api_key),
+        "llm_sdk_available": llm_sdk_available(provider),
+        "vision_supported": provider_supports_vision(provider),
     }
-
-
-def zhipuai_package_available() -> bool:
-    return importlib.util.find_spec("zhipuai") is not None
 
 
 def require_diagnostic_auth(request: Request) -> None:
@@ -1246,13 +1431,17 @@ def _call_glm_with_retry(
     kind: str,
 ) -> Any:
     try:
-        response = get_zhipu_client().chat.completions.create(
+        response = get_llm_client().chat.completions.create(
             model=model, messages=messages, temperature=temperature, max_tokens=max_tokens
         )
     except (httpx.ConnectError, httpx.ConnectTimeout):
-        logger.warning("Transient GLM connection error, retrying once (kind=%s)", kind)
+        logger.warning(
+            "Transient model connection error, retrying once (kind=%s provider=%s)",
+            kind,
+            get_settings().llm_provider,
+        )
         try:
-            response = get_zhipu_client().chat.completions.create(
+            response = get_llm_client().chat.completions.create(
                 model=model, messages=messages, temperature=temperature, max_tokens=max_tokens
             )
         except Exception:
@@ -1289,6 +1478,8 @@ def reply_to_image(image_url: str) -> str:
     settings = get_settings()
     if not is_http_url(image_url):
         return "我收到了图片消息，但没有拿到可用的图片地址。"
+    if not provider_supports_vision(settings.llm_provider):
+        return IMAGE_UNSUPPORTED_REPLY
 
     messages = [
         {

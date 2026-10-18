@@ -16,8 +16,15 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 # Settings that are read from the environment or an env file. SMOKE_BASE_URL is
-# not in .env.example but is honoured by scripts/smoke_wechat.py.
-EXTRA_SETTINGS = ("SMOKE_BASE_URL",)
+# not in .env.example but is honoured by scripts/smoke_wechat.py. The legacy
+# provider-specific key aliases are commented out in .env.example, so list them
+# explicitly to keep a developer's shell from leaking into tests.
+EXTRA_SETTINGS = (
+    "SMOKE_BASE_URL",
+    "ZHIPU_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "OPENAI_API_KEY",
+)
 
 
 def _project_settings():
@@ -42,7 +49,7 @@ def isolate_project_environment(monkeypatch):
     # Drop cached settings so a value from an earlier test cannot leak in.
     main = sys.modules.get("main")
     if main is not None:
-        for name in ("get_settings", "get_zhipu_client", "get_moderation_blocklist"):
+        for name in ("get_settings", "get_llm_client", "get_moderation_blocklist"):
             cached = getattr(main, name, None)
             cache_clear = getattr(cached, "cache_clear", None)
             if callable(cache_clear):

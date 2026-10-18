@@ -436,3 +436,88 @@ def test_main_can_treat_warnings_as_failures(tmp_path, monkeypatch, capsys):
 
     assert exit_code == 1
     assert "WECHAT_TOKEN is shorter than 16 characters" in capsys.readouterr().out
+
+
+def _clear_model_env(monkeypatch):
+    for name in (
+        "LLM_API_KEY",
+        "LLM_PROVIDER",
+        "ZHIPU_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "OPENAI_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_run_checks_accepts_llm_api_key_for_deepseek(tmp_path, monkeypatch):
+    _clear_model_env(monkeypatch)
+    env_file = write_env(
+        tmp_path,
+        "\n".join(
+            [
+                "LLM_PROVIDER=deepseek",
+                "LLM_API_KEY=sk-deepseek-key",
+                "TEXT_MODEL=deepseek-chat",
+                "WECHAT_TOKEN=a-long-enough-wechat-token",
+            ]
+        ),
+    )
+
+    results = check_config.run_checks(str(env_file), skip_dependencies=True)
+
+    assert "LLM_API_KEY is configured" in messages(results)
+    assert "LLM_PROVIDER=deepseek" in messages(results)
+
+
+def test_run_checks_accepts_deepseek_key_alias(tmp_path, monkeypatch):
+    _clear_model_env(monkeypatch)
+    env_file = write_env(
+        tmp_path,
+        "\n".join(
+            [
+                "LLM_PROVIDER=deepseek",
+                "DEEPSEEK_API_KEY=sk-deepseek-key",
+                "WECHAT_TOKEN=a-long-enough-wechat-token",
+            ]
+        ),
+    )
+
+    results = check_config.run_checks(str(env_file), skip_dependencies=True)
+
+    assert "DEEPSEEK_API_KEY is configured" in messages(results)
+
+
+def test_run_checks_rejects_missing_model_key(tmp_path, monkeypatch):
+    _clear_model_env(monkeypatch)
+    env_file = write_env(
+        tmp_path,
+        "\n".join(
+            [
+                "LLM_PROVIDER=deepseek",
+                "WECHAT_TOKEN=a-long-enough-wechat-token",
+            ]
+        ),
+    )
+
+    results = check_config.run_checks(str(env_file), skip_dependencies=True)
+
+    assert "model API key is required: LLM_API_KEY or DEEPSEEK_API_KEY" in messages(results)
+
+
+def test_run_checks_rejects_unknown_provider(tmp_path, monkeypatch):
+    _clear_model_env(monkeypatch)
+    env_file = write_env(
+        tmp_path,
+        "\n".join(
+            [
+                "LLM_PROVIDER=gemini",
+                "LLM_API_KEY=some-key",
+                "WECHAT_TOKEN=a-long-enough-wechat-token",
+            ]
+        ),
+    )
+
+    results = check_config.run_checks(str(env_file), skip_dependencies=True)
+
+    assert "LLM_PROVIDER must be one of: DEEPSEEK, OPENAI, ZHIPU" in messages(results)
+
