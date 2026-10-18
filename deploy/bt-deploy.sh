@@ -30,30 +30,74 @@ die() {
 [[ -f "$INSTALL_DIR/main.py" ]] || die "在 $INSTALL_DIR 找不到 main.py，请先 cd 到项目目录。"
 
 # ---------- 1. Python ----------
-PYTHON_BIN=""
-if command -v python3 >/dev/null 2>&1 && \
-  python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
-  PYTHON_BIN=python3
-else
-  warn "系统自带 python3 不可用或低于 3.9，尝试安装 python3.11 ..."
-  if command -v dnf >/dev/null 2>&1; then
-    dnf install -y python3.11 python3.11-pip >/dev/null 2>&1 || true
-  elif command -v yum >/dev/null 2>&1; then
-    yum install -y python3.11 python3.11-pip >/dev/null 2>&1 || true
-  elif command -v apt-get >/dev/null 2>&1; then
-    apt-get update -qq >/dev/null 2>&1 || true
-    DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv python3-pip >/dev/null 2>&1 || true
-  fi
-  for candidate in python3.12 python3.11 python3.10 python3.9 python3; do
-    if command -v "$candidate" >/dev/null 2>&1 && \
-      "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
-      PYTHON_BIN=$candidate
-      break
+py_ok() {
+  [[ -n "${1:-}" ]] && [[ -x "$1" ]] && \
+    "$1" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null
+}
+
+find_python() {
+  local candidate
+  for candidate in python3.13 python3.12 python3.11 python3.10 python3.9 python3 \
+    /usr/local/bin/python3.13 /usr/local/bin/python3.12 /usr/local/bin/python3.11 \
+    /usr/local/bin/python3.10 /usr/local/bin/python3.9 \
+    /www/server/pyenv/versions/*/bin/python3 \
+    /www/server/pyporject_evn/versions/*/bin/python3 \
+    /www/server/python_manager/versions/*/bin/python3 \
+    /www/server/panel/pyenv/bin/python3; do
+    if [[ "$candidate" == *"*"* ]]; then
+      for expanded in $candidate; do
+        py_ok "$expanded" && { echo "$expanded"; return 0; }
+      done
+      continue
+    fi
+    if command -v "$candidate" >/dev/null 2>&1 || [[ -x "$candidate" ]]; then
+      py_ok "$candidate" && { echo "$candidate"; return 0; }
     fi
   done
+  return 1
+}
+
+PYTHON_BIN=$(find_python || true)
+
+if [[ -z "$PYTHON_BIN" ]]; then
+  warn "没找到 Python 3.9+，尝试用包管理器安装 ..."
+  if command -v dnf >/dev/null 2>&1; then
+    for pkg in python3.11 python3.11-pip python3.12 python3.12-pip python3.9; do
+      dnf install -y "$pkg" >/dev/null 2>&1 || true
+    done
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y epel-release >/dev/null 2>&1 || true
+    for pkg in python3.11 python3.11-pip python39 python3; do
+      yum install -y "$pkg" >/dev/null 2>&1 || true
+    done
+  elif command -v apt-get >/dev/null 2>&1; then
+    apt-get update -qq >/dev/null 2>&1 || true
+    for pkg in python3.11 python3.11-venv python3.10 python3.10-venv python3.9 python3.9-venv python3 python3-venv python3-pip; do
+      DEBIAN_FRONTEND=noninteractive apt-get install -y "$pkg" >/dev/null 2>&1 || true
+    done
+  fi
+  PYTHON_BIN=$(find_python || true)
 fi
-[[ -n "$PYTHON_BIN" ]] || die "找不到 Python 3.9+，请先在宝塔「软件商店」安装 Python 3.11"
-log "使用 $("$PYTHON_BIN" -V 2>&1)"
+
+if [[ -z "$PYTHON_BIN" ]]; then
+  echo
+  echo "系统信息：$(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME")"
+  ls /usr/bin/python* /usr/local/bin/python* 2>/dev/null
+  die "找不到可用的 Python 3.9+。请到宝塔「软件商店」安装 Python 3.11（或 Python 项目管理器），装完重跑本脚本。"
+fi
+log "使用 $("$PYTHON_BIN" -V 2>&1) -> $PYTHON_BIN"
+
+if ! "$PYTHON_BIN" -m venv --help >/dev/null 2>&1; then
+  warn "该 Python 缺少 venv 模块，尝试安装对应包 ..."
+  if command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
+    PM=$(command -v dnf || command -v yum)
+    "$PM" install -y python3-venv >/dev/null 2>&1 || true
+  elif command -v apt-get >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv >/dev/null 2>&1 || true
+  fi
+  "$PYTHON_BIN" -m venv --help >/dev/null 2>&1 || \
+    die "这个 Python 没有 venv 模块，请安装 python3-venv 后重试。"
+fi
 
 # ---------- 2. 运行用户 ----------
 if ! id "$APP_USER" >/dev/null 2>&1; then
