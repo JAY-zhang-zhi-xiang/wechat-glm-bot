@@ -331,6 +331,24 @@ sudo systemctl restart wechat-glm-assistant
 
 脚本可重复执行（幂等），改完代码重新 `sudo bash deploy/install.sh --server-address ...` 即可完成更新和重启。
 
+### 宝塔面板服务器
+
+如果服务器上已经装了宝塔面板，**不要**用 `install.sh`：它会再装一套系统 Nginx，和面板自带的 Nginx 抢 80 端口。改用宝塔专用脚本，它复用面板的 Nginx，只往 `/www/server/panel/vhost/nginx/` 写一个站点配置：
+
+```bash
+cd /www/wwwroot/wechat-glm-bot
+bash deploy/bt-deploy.sh 你的公网IP
+```
+
+脚本会：建虚拟环境装依赖（清华镜像）、生成带随机 `WECHAT_TOKEN` 的 `.env`、装 systemd 服务并等 `/health` 通过、写入 Nginx 反代并 reload，最后打印微信后台要填的 URL 和 Token。
+
+之后填模型 Key 只需改一行：
+
+```bash
+nano /www/wwwroot/wechat-glm-bot/.env   # LLM_API_KEY=sk-xxxx
+systemctl restart wechat-glm-assistant
+```
+
 > 安全组 / 防火墙需要放行入站 TCP 80，否则微信回调会连不上。
 
 公网部署建议设置 `ADMIN_TOKEN`，把 `ENABLE_DOCS=false`，并设置 `ALLOW_ADMIN_TOKEN_QUERY=false`；配置检查脚本会对公开诊断接口、URL 查询参数令牌和自动文档给出 warning。

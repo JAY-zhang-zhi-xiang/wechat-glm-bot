@@ -109,3 +109,18 @@ def test_readme_documents_server_deployment_paths():
     assert "deploy/install.sh" in readme
     assert "--server-address" in readme
     assert "certbot" in readme
+
+
+def test_bt_deploy_script_reuses_bt_nginx():
+    script = ROOT / "deploy" / "bt-deploy.sh"
+    assert script.exists()
+
+    content = script.read_text(encoding="utf-8")
+    assert content.startswith("#!/usr/bin/env bash")
+    # Must reuse the panel's nginx instead of installing another one.
+    assert "/www/server/nginx/sbin/nginx" in content
+    assert "/www/server/panel/vhost/nginx" in content
+    assert "apt-get install -y nginx" not in content
+    assert "dnf install -y nginx" not in content
+    assert "systemctl restart" in content
+
