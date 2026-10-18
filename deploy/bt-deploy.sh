@@ -40,6 +40,7 @@ find_python() {
   for candidate in python3.13 python3.12 python3.11 python3.10 python3.9 python3 \
     /usr/local/bin/python3.13 /usr/local/bin/python3.12 /usr/local/bin/python3.11 \
     /usr/local/bin/python3.10 /usr/local/bin/python3.9 \
+    /opt/python/bin/python3 \
     /www/server/pyenv/versions/*/bin/python3 \
     /www/server/pyporject_evn/versions/*/bin/python3 \
     /www/server/python_manager/versions/*/bin/python3 \
