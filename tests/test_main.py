@@ -1556,3 +1556,15 @@ def test_ready_passes_for_text_only_provider(monkeypatch):
     assert response.json()["ok"] is True
     assert response.json()["checks"]["vision_supported"] is False
 
+
+
+def test_placeholder_api_key_counts_as_not_configured(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "deepseek")
+    monkeypatch.setenv("LLM_API_KEY", "replace-with-your-deepseek-api-key")
+    main.get_settings.cache_clear()
+    client = TestClient(main.app)
+
+    assert main.get_settings().llm_api_key == ""
+    assert client.get("/ready").status_code == 503
+    assert client.get("/ready").json()["checks"]["llm_key_configured"] is False
+

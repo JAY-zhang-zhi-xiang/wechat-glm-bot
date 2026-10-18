@@ -243,11 +243,22 @@ def normalize_provider(value: Optional[str]) -> str:
     return provider
 
 
+PLACEHOLDER_SECRET_PREFIX = "replace-with-"
+PLACEHOLDER_SECRETS = frozenset({"your-token", "your-api-key", "your-key"})
+
+
+def is_placeholder_secret(value: str) -> bool:
+    """True for values copied straight from .env.example."""
+    return value.startswith(PLACEHOLDER_SECRET_PREFIX) or value in PLACEHOLDER_SECRETS
+
+
 def resolve_llm_api_key(provider: str) -> str:
     names = ("LLM_API_KEY",) + PROVIDER_KEY_ENV_NAMES.get(provider, ())
     for name in names:
         value = os.getenv(name, "").strip()
-        if value:
+        # A template value would make the service look configured while every
+        # model call fails with 401, so treat it as missing.
+        if value and not is_placeholder_secret(value):
             return value
     return ""
 

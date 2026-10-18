@@ -31,8 +31,9 @@ die() {
 
 # ---------- 1. Python ----------
 py_ok() {
-  [[ -n "${1:-}" ]] && [[ -x "$1" ]] && \
-    "$1" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null
+  # A distro/panel build can pass the version check but miss the ssl module
+  # (CentOS 7 ships OpenSSL 1.0.2), which makes pip unusable. Require ssl.
+  [[ -n "${1:-}" ]] && [[ -x "$1" ]] && "$1" -c 'import sys, ssl, venv; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null
 }
 
 find_python() {
@@ -108,6 +109,12 @@ if ! id "$APP_USER" >/dev/null 2>&1; then
 fi
 
 # ---------- 3. 虚拟环境与依赖 ----------
+if [[ -x "$INSTALL_DIR/.venv/bin/python" ]] && \
+  ! "$INSTALL_DIR/.venv/bin/python" -c 'import ssl' >/dev/null 2>&1; then
+  warn "现有虚拟环境缺少 ssl 模块（pip 无法联网），重建中 ..."
+  rm -rf "$INSTALL_DIR/.venv"
+fi
+
 if [[ ! -x "$INSTALL_DIR/.venv/bin/python" ]]; then
   log "创建虚拟环境 ..."
   "$PYTHON_BIN" -m venv "$INSTALL_DIR/.venv" || die "创建 venv 失败（Debian/Ubuntu 可能缺少 python3-venv）"
@@ -116,8 +123,10 @@ fi
 log "安装依赖（使用清华镜像加速）..."
 "$INSTALL_DIR/.venv/bin/python" -m pip install --upgrade pip -q \
   -i https://pypi.tuna.tsinghua.edu.cn/simple || true
-"$INSTALL_DIR/.venv/bin/python" -m pip install -r "$INSTALL_DIR/requirements.txt" -q \
-  -i https://pypi.tuna.tsinghua.edu.cn/simple
+if ! "$INSTALL_DIR/.venv/bin/python" -m pip install -r "$INSTALL_DIR/requirements.txt" -q \
+  -i https://pypi.tuna.tsinghua.edu.cn/simple; then
+  die "依赖安装失败。多半是这个 Python 缺少 ssl 模块，请改用 /opt/python 那份独立 Python 后重试。"
+fi
 log "依赖安装完成"
 
 # ---------- 4. .env ----------
